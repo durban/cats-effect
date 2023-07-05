@@ -1552,6 +1552,47 @@ class IOSpec extends BaseSpec with Discipline with IOPlatformSpecification {
         p must completeAs(true)
       }
 
+      "propagate canceled" in ticked { implicit ticker =>
+        List(1, 2, 3, 4)
+          .parTraverseN(2) { (n: Int) =>
+            if (n == 3) IO.canceled *> IO.never
+            else IO.pure(n)
+          }
+          .void must selfCancel
+      }
+
+      "not run more than `n` tasks at a time" in real {
+        def task(counter: Ref[IO, Int], maximum: Ref[IO, Int]): IO[Unit] = {
+          val acq = counter.updateAndGet(_ + 1).flatMap { count =>
+            maximum.update { max => if (count > max) count else max }
+          }
+          IO.asyncForIO.bracket(acq) { _ => IO.sleep(100.millis) }(_ => counter.update(_ - 1))
+        }
+
+        for {
+          maximum <- Ref.of[IO, Int](0)
+          counter <- Ref.of[IO, Int](0)
+          nCpu <- IO { Runtime.getRuntime().availableProcessors() }
+          n = java.lang.Math.max(nCpu, 2)
+          size = 4 * n
+          res <- (1 to size).toList.parTraverseN(n) { _ => task(counter, maximum) }
+          _ <- IO { res.size mustEqual size }
+          count <- counter.get
+          _ <- IO { count mustEqual 0 }
+          max <- maximum.get
+          _ <- IO { max must beLessThanOrEqualTo(n) }
+        } yield ok
+      }
+
+      "run actually in parallel" in real {
+        val n = 4
+        (1 to 2 * n)
+          .toList
+          .map { i => IO.sleep(1.second).as(i) }
+          .parSequenceN(n)
+          .timeout(3.seconds)
+          .flatMap { res => IO { res mustEqual (1 to 2 * n).toList } }
+      }
     }
 
     "parallel" should {
