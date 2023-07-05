@@ -17,6 +17,7 @@
 package cats.effect.benchmarks
 
 import cats.effect.IO
+import cats.effect.syntax.concurrent.concurrentParTraverseOps
 import cats.effect.unsafe.implicits.global
 import cats.implicits.{catsSyntaxParallelTraverse1, toTraverseOps}
 
@@ -51,9 +52,20 @@ class ParallelBenchmark {
   @Param(Array( /*"100", "1000", */ "10000" /*, "100000", "1000000"*/ ))
   var cpuTokens: Long = _
 
+  private[this] val nCpu = Runtime.getRuntime().availableProcessors()
+
   @Benchmark
   def parTraverse(): Unit =
     1.to(size).toList.parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens))).void.unsafeRunSync()
+
+  @Benchmark
+  def parTraverseN(): Unit = {
+    1.to(size)
+      .toList
+      .parTraverseN(nCpu)(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .void
+      .unsafeRunSync()
+  }
 
   @Benchmark
   def traverse(): Unit =
