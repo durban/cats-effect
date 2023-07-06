@@ -1552,13 +1552,51 @@ class IOSpec extends BaseSpec with Discipline with IOPlatformSpecification {
         p must completeAs(true)
       }
 
-      "propagate canceled" in ticked { implicit ticker =>
+      "run finalizers when cancelled" in ticked { implicit ticker =>
+        val p = for {
+          r <- IO.ref(0)
+          f <- List(1, 2, 3)
+            .parTraverseN(2) { i =>
+              if (i == 2) IO.unit
+              else IO.never.onCancel(r.update(_ + 1))
+            }
+            .start
+          _ <- IO.sleep(100.millis)
+          _ <- f.cancel
+          c <- r.get
+          _ <- IO { c mustEqual 2 }
+        } yield true
+
+        p must completeAs(true)
+      }
+
+      "propagate self-cancellation" in ticked { implicit ticker =>
         List(1, 2, 3, 4)
           .parTraverseN(2) { (n: Int) =>
             if (n == 3) IO.canceled *> IO.never
             else IO.pure(n)
           }
           .void must selfCancel
+      }
+
+      "run finalizers when a task self-cancels" in ticked { implicit ticker =>
+        val p = for {
+          r <- IO.ref(0)
+          fib <- List(1, 2, 3, 4)
+            .parTraverseN(2) { (n: Int) =>
+              if (n == 3) IO.canceled *> IO.never
+              else IO.pure(n)
+            }
+            .onCancel(r.update(_ + 1))
+            .void
+            .start
+          _ <- IO.sleep(100.millis)
+          c <- r.get
+          _ <- IO { c mustEqual 1 }
+          oc <- fib.join
+        } yield oc.isCanceled
+
+        p must completeAs(true)
       }
 
       "not run more than `n` tasks at a time" in real {
