@@ -1593,6 +1593,37 @@ class IOSpec extends BaseSpec with Discipline with IOPlatformSpecification {
           .timeout(3.seconds)
           .flatMap { res => IO { res mustEqual (1 to 2 * n).toList } }
       }
+
+      "work for empty traverse" in ticked { implicit ticker =>
+        List.empty[Int].parTraverseN(4) { _ => IO.never[String] } must completeAs(
+          List.empty[String])
+      }
+
+      "work for non-empty traverse (ticked)" in ticked { implicit ticker =>
+        List(1).parTraverseN(4) { i => IO.pure(i.toString) } must completeAs(List("1"))
+        List(1, 2).parTraverseN(3) { i => IO.pure(i.toString) } must completeAs(List("1", "2"))
+        List(1, 2, 3).parTraverseN(2) { i => IO.pure(i.toString) } must completeAs(
+          List("1", "2", "3"))
+        List(1, 2, 3, 4).parTraverseN(1) { i => IO.pure(i.toString) } must completeAs(
+          List("1", "2", "3", "4"))
+      }
+
+      "work for non-empty traverse (real)" in real {
+        for {
+          _ <- List(1).parTraverseN(4) { i => IO.pure(i.toString) }.flatMap { r =>
+            IO(r mustEqual List("1"))
+          }
+          _ <- List(1, 2).parTraverseN(3) { i => IO.pure(i.toString) }.flatMap { r =>
+            IO(r mustEqual List("1", "2"))
+          }
+          _ <- List(1, 2, 3).parTraverseN(2) { i => IO.pure(i.toString) }.flatMap { r =>
+            IO(r mustEqual List("1", "2", "3"))
+          }
+          _ <- List(1, 2, 3, 4).parTraverseN(1) { i => IO.pure(i.toString) }.flatMap { r =>
+            IO(r mustEqual List("1", "2", "3", "4"))
+          }
+        } yield ok
+      }
     }
 
     "parallel" should {
