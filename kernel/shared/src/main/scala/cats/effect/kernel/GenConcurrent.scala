@@ -22,6 +22,8 @@ import cats.effect.kernel.instances.spawn._
 import cats.effect.kernel.syntax.all._
 import cats.syntax.all._
 
+import java.util.concurrent.ThreadLocalRandom
+
 trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
 
   import GenConcurrent._
@@ -126,14 +128,70 @@ trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
   /**
    * Like `Parallel.parTraverse`, but limits the degree of parallelism. Note that the semantics
    * of this operation aim to maximise fairness: when a spot to execute becomes available, every
-   * task has a chance to claim it, and not only the next `n` tasks in `ta`
+   * task has a chance to claim it, and not only the next `n` tasks in `ta`.
    */
   def parTraverseN[T[_]: Traverse, A, B](n: Int)(ta: T[A])(f: A => F[B]): F[T[B]] = {
     require(n >= 1, s"Concurrency limit should be at least 1, was: $n")
 
     implicit val F: GenConcurrent[F, E] = this
 
-    MiniSemaphore[F](n).flatMap { sem => ta.parTraverse { a => sem.withPermit(f(a)) } }
+    ref[Vector[F[B]]](Vector.empty).flatMap { tasksRef =>
+      ta.traverse { a =>
+        val task = f(a)
+        tasksRef.modify { tasks => (tasks :+ task, tasks.size) }
+      }.flatMap { (indices: T[Int]) =>
+        tasksRef.get.map(_.size).flatMap { size =>
+          if (size > 0) {
+            // non-empty `T[A]`
+            ref[Vector[B]](Vector.fill(size)(null.asInstanceOf[B])).flatMap { resultsRef =>
+              def worker: F[Unit] = {
+                tasksRef
+                  .modify { tasks =>
+                    if (tasks eq null) {
+                      (null, null)
+                    } else {
+                      val startIdx = ThreadLocalRandom.current().nextInt(size)
+                      var idx = startIdx
+                      var task: F[B] = null.asInstanceOf[F[B]]
+                      var go = true
+                      while ({
+                        task = tasks(idx)
+                        go && (task.asInstanceOf[AnyRef] eq null)
+                      }) {
+                        idx += 1
+                        if (idx == size) {
+                          idx = 0
+                        }
+                        if (idx == startIdx) {
+                          go = false
+                        }
+                      }
+                      if (task.asInstanceOf[AnyRef] ne null) {
+                        (tasks.updated(idx, null.asInstanceOf[F[B]]), (idx, task))
+                      } else {
+                        (null, null)
+                      }
+                    }
+                  }
+                  .flatMap {
+                    case null =>
+                      unit
+                    case (idx, nextTask) =>
+                      nextTask.flatMap { result =>
+                        resultsRef.update { results => results.updated(idx, result) }
+                      } *> worker
+                  }
+              }
+
+              worker.parReplicateA_(n) *> resultsRef.get.map { results => indices.map(results) }
+            }
+          } else {
+            // empty `T[A]`
+            indices.traverse { _ => never[B] }
+          }
+        }
+      }
+    }
   }
 
   override def racePair[A, B](fa: F[A], fb: F[B])
