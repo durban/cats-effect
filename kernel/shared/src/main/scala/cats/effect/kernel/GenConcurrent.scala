@@ -135,64 +135,65 @@ trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
 
     implicit val F: GenConcurrent[F, E] = this
 
+    final case class IdxAndTask(idx: Int, task: F[B])
+
     ref[Vector[F[B]]](Vector.empty).flatMap { tasksRef =>
-      tasksRef
-        .set(ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result())
-        .flatMap { _ =>
-          tasksRef.get.map(_.size).flatMap { size =>
-            if (size > 0) {
-              // non-empty `T[A]`
-              ref[Vector[B]](Vector.fill(size)(null.asInstanceOf[B])).flatMap { resultsRef =>
-                def worker: F[Unit] = {
-                  tasksRef
-                    .modify { tasks =>
-                      if (tasks eq null) {
-                        (null, null)
-                      } else {
-                        val startIdx = ThreadLocalRandom.current().nextInt(size)
-                        var idx = startIdx
-                        var task: F[B] = null.asInstanceOf[F[B]]
-                        var go = true
-                        while ({
-                          task = tasks(idx)
-                          go && (task.asInstanceOf[AnyRef] eq null)
-                        }) {
-                          idx += 1
-                          if (idx == size) {
-                            idx = 0
-                          }
-                          if (idx == startIdx) {
-                            go = false
-                          }
-                        }
-                        if (task.asInstanceOf[AnyRef] ne null) {
-                          (tasks.updated(idx, null.asInstanceOf[F[B]]), (idx, task))
-                        } else {
-                          (null, null)
-                        }
+      val initialTasks =
+        ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
+      val size = initialTasks.size
+      tasksRef.set(initialTasks).flatMap { _ =>
+        if (size > 0) {
+          // non-empty `T[A]`
+          ref[Vector[B]](Vector.fill(size)(null.asInstanceOf[B])).flatMap { resultsRef =>
+            def worker: F[Unit] = {
+              tasksRef
+                .modify { tasks =>
+                  if (tasks eq null) {
+                    (null, null)
+                  } else {
+                    val startIdx = ThreadLocalRandom.current().nextInt(size)
+                    var idx = startIdx
+                    var task: F[B] = null.asInstanceOf[F[B]]
+                    var go = true
+                    while ({
+                      task = tasks(idx)
+                      go && (task.asInstanceOf[AnyRef] eq null)
+                    }) {
+                      idx += 1
+                      if (idx == size) {
+                        idx = 0
+                      }
+                      if (idx == startIdx) {
+                        go = false
                       }
                     }
-                    .flatMap {
-                      case null =>
-                        unit
-                      case (idx, nextTask) =>
-                        nextTask.flatMap { result =>
-                          resultsRef.update { results => results.updated(idx, result) }
-                        } *> worker
+                    if (task.asInstanceOf[AnyRef] ne null) {
+                      (tasks.updated(idx, null.asInstanceOf[F[B]]), IdxAndTask(idx, task))
+                    } else {
+                      (null, null)
                     }
+                  }
                 }
+                .flatMap {
+                  case null =>
+                    unit
+                  case IdxAndTask(idx, nextTask) =>
+                    nextTask.flatMap { result =>
+                      resultsRef.update { results => results.updated(idx, result) }
+                    } *> worker
+                }
+            }
 
-                worker.parReplicateA_(n) *> resultsRef.get.map { (results: Vector[B]) =>
-                  val it = results.iterator
-                  ta.map { _ => it.next() }
-                }
-              }
-            } else {
-              // empty `T[A]`
-              ta.traverse { _ => never[B] }
+            worker.parReplicateA_(n) *> resultsRef.get.map { (results: Vector[B]) =>
+              val it = results.iterator
+              ta.map { _ => it.next() }
             }
           }
+        } else {
+          // empty `T[A]`
+          ta.traverse { _ => never[B] }
         }
+      }
     }
   }
 
