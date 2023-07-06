@@ -1627,6 +1627,26 @@ class IOSpec extends BaseSpec with Discipline with IOPlatformSpecification {
           }
         } yield ok
       }
+
+      "be fair" in real {
+        val tsk = IO.ref(0).flatMap { winner =>
+          (1 to 8)
+            .toList
+            .parTraverseN(2) { i =>
+              winner.update {
+                case 0 => i
+                case x => x
+              }
+            }
+            .flatMap { _ => winner.get }
+        }
+        // at least some of the time, the winner
+        // should be the last one (`8`); preferably
+        // about 1/8 of the time, but we're less
+        // strict here, because we don't want an
+        // unstable test:
+        tsk.replicateA(64).flatMap { (winners: List[Int]) => IO { winners must contain(8) } }
+      }
     }
 
     "parallel" should {
