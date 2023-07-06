@@ -1610,17 +1610,20 @@ class IOSpec extends BaseSpec with Discipline with IOPlatformSpecification {
 
       "work for non-empty traverse (real)" in real {
         for {
-          _ <- List(1).parTraverseN(4) { i => IO.pure(i.toString) }.flatMap { r =>
+          _ <- List(1).parTraverseN(4)(i => IO.pure(i.toString)).flatMap { r =>
             IO(r mustEqual List("1"))
           }
-          _ <- List(1, 2).parTraverseN(3) { i => IO.pure(i.toString) }.flatMap { r =>
+          _ <- List(1, 2).parTraverseN(3)(i => IO.pure(i.toString)).flatMap { r =>
             IO(r mustEqual List("1", "2"))
           }
-          _ <- List(1, 2, 3).parTraverseN(2) { i => IO.pure(i.toString) }.flatMap { r =>
+          _ <- List(1, 2, 3).parTraverseN(2)(i => IO.pure(i.toString)).flatMap { r =>
             IO(r mustEqual List("1", "2", "3"))
           }
-          _ <- List(1, 2, 3, 4).parTraverseN(1) { i => IO.pure(i.toString) }.flatMap { r =>
+          _ <- List(1, 2, 3, 4).parTraverseN(1)(i => IO.pure(i.toString)).flatMap { r =>
             IO(r mustEqual List("1", "2", "3", "4"))
+          }
+          _ <- (1 to 10000).toList.parTraverseN(2)(i => IO.pure(i.toString)).flatMap { r =>
+            IO(r mustEqual (1 to 10000).map(_.toString).toList)
           }
         } yield ok
       }
