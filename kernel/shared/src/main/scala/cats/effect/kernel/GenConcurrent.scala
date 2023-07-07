@@ -135,8 +135,6 @@ trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
 
     implicit val F: GenConcurrent[F, E] = this
 
-    final case class IdxAndTask(idx: Int, task: F[B])
-
     ref[Vector[F[B]]](Vector.empty).flatMap { tasksRef =>
       val initialTasks =
         ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
@@ -239,6 +237,8 @@ object GenConcurrent {
     ) extends Memoize[F, E, A]
     final case class Finished[F[_], E, A](result: Either[E, F[A]]) extends Memoize[F, E, A]
   }
+
+  private final case class IdxAndTask[F[_], B](idx: Int, task: F[B]) // used by parTraverseN
 
   implicit def genConcurrentForOptionT[F[_], E](
       implicit F0: GenConcurrent[F, E]): GenConcurrent[OptionT[F, *], E] =
