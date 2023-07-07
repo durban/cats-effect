@@ -23,6 +23,7 @@ import cats.effect.kernel.syntax.all._
 import cats.syntax.all._
 
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
 
@@ -130,70 +131,8 @@ trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
    * of this operation aim to maximise fairness: when a spot to execute becomes available, every
    * task has a chance to claim it, and not only the next `n` tasks in `ta`.
    */
-  def parTraverseN[T[_]: Traverse, A, B](n: Int)(ta: T[A])(f: A => F[B]): F[T[B]] = {
-    require(n >= 1, s"Concurrency limit should be at least 1, was: $n")
-
-    implicit val F: GenConcurrent[F, E] = this
-
-    ref[Vector[F[B]]](Vector.empty).flatMap { tasksRef =>
-      val initialTasks =
-        ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
-      val size = initialTasks.size
-      tasksRef.set(initialTasks).flatMap { _ =>
-        if (size > 0) {
-          // non-empty `T[A]`
-          ref[Vector[B]](Vector.fill(size)(null.asInstanceOf[B])).flatMap { resultsRef =>
-            def worker: F[Unit] = {
-              tasksRef
-                .modify { tasks =>
-                  if (tasks eq null) {
-                    (null, null)
-                  } else {
-                    val startIdx = ThreadLocalRandom.current().nextInt(size)
-                    var idx = startIdx
-                    var task: F[B] = null.asInstanceOf[F[B]]
-                    var go = true
-                    while ({
-                      task = tasks(idx)
-                      go && (task.asInstanceOf[AnyRef] eq null)
-                    }) {
-                      idx += 1
-                      if (idx == size) {
-                        idx = 0
-                      }
-                      if (idx == startIdx) {
-                        go = false
-                      }
-                    }
-                    if (task.asInstanceOf[AnyRef] ne null) {
-                      (tasks.updated(idx, null.asInstanceOf[F[B]]), IdxAndTask(idx, task))
-                    } else {
-                      (null, null)
-                    }
-                  }
-                }
-                .flatMap {
-                  case null =>
-                    unit
-                  case IdxAndTask(idx, nextTask) =>
-                    nextTask.flatMap { result =>
-                      resultsRef.update { results => results.updated(idx, result) }
-                    } *> worker
-                }
-            }
-
-            worker.parReplicateA_(n) *> resultsRef.get.map { (results: Vector[B]) =>
-              val it = results.iterator
-              ta.map { _ => it.next() }
-            }
-          }
-        } else {
-          // empty `T[A]`
-          ta.traverse { _ => never[B] }
-        }
-      }
-    }
-  }
+  def parTraverseN[T[_]: Traverse, A, B](n: Int)(ta: T[A])(f: A => F[B]): F[T[B]] =
+    GenConcurrent.parTraverseN(n)(ta)(f)(this, Traverse[T])
 
   override def racePair[A, B](fa: F[A], fb: F[B])
       : F[Either[(Outcome[F, E, A], Fiber[F, E, B]), (Fiber[F, E, A], Outcome[F, E, B])]] = {
@@ -239,6 +178,137 @@ object GenConcurrent {
   }
 
   private final case class IdxAndTask[F[_], B](idx: Int, task: F[B]) // used by parTraverseN
+
+  private final def parTraverseN[F[_], T[_], E, A, B](n: Int)(ta: T[A])(
+      f: A => F[B])(implicit F: GenConcurrent[F, E], T: Traverse[T]): F[T[B]] = {
+    require(n >= 1, s"Concurrency limit should be at least 1, was: $n")
+    F match {
+      case asyncF: Async[_] => parTraverseNAsync(n)(ta)(f)(asyncF, T)
+      case _ => parTraverseNConcurrent(n)(ta)(f)
+    }
+  }
+
+  private[this] final def parTraverseNAsync[F[_], T[_], A, B](n: Int)(ta: T[A])(
+      f: A => F[B])(implicit F: Async[F], T: Traverse[T]): F[T[B]] = {
+    F.suspend(Sync.Type.Delay) {
+      val initialTasks =
+        ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
+      val size = initialTasks.size
+      val tasks = new AtomicReferenceArray[F[B]](size)
+      var idx = 0
+      initialTasks.foreach { task =>
+        tasks.lazySet(idx, task)
+        idx += 1
+      }
+      tasks
+    }.flatMap { (tasks: AtomicReferenceArray[F[B]]) =>
+      val size = tasks.length()
+      if (size > 0) {
+        // non-empty `T[A]`
+        F.delay { new Array[AnyRef](size) }.flatMap { results =>
+          def worker: F[Unit] = {
+            F.delay {
+              val startIdx = ThreadLocalRandom.current().nextInt(size)
+              var idx = startIdx
+              var task: F[B] = null.asInstanceOf[F[B]]
+              var go = true
+              while ({
+                task = tasks.getAndSet(idx, null.asInstanceOf[F[B]])
+                go && (task.asInstanceOf[AnyRef] eq null)
+              }) {
+                idx += 1
+                if (idx == size) {
+                  idx = 0
+                }
+                if (idx == startIdx) {
+                  go = false
+                }
+              }
+              if (task.asInstanceOf[AnyRef] ne null) IdxAndTask(idx, task)
+              else null
+            }.flatMap {
+              case null =>
+                F.unit
+              case IdxAndTask(idx, nextTask) =>
+                nextTask.flatMap { result =>
+                  F.delay { results(idx) = result.asInstanceOf[AnyRef] }
+                } *> worker
+            }
+          }
+
+          worker.parReplicateA_(n) *> F.delay {
+            val it = results.iterator
+            ta.map { _ => it.next().asInstanceOf[B] }
+          }
+        }
+      } else {
+        // empty `T[A]`
+        ta.traverse { _ => F.never[B] }
+      }
+    }
+  }
+
+  private[this] final def parTraverseNConcurrent[F[_], T[_], E, A, B](n: Int)(ta: T[A])(
+      f: A => F[B])(implicit F: GenConcurrent[F, E], T: Traverse[T]): F[T[B]] = {
+    F.ref[Vector[F[B]]](Vector.empty).flatMap { tasksRef =>
+      val initialTasks =
+        ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
+      val size = initialTasks.size
+      tasksRef.set(initialTasks).flatMap { _ =>
+        if (size > 0) {
+          // non-empty `T[A]`
+          F.ref[Vector[B]](Vector.fill(size)(null.asInstanceOf[B])).flatMap { resultsRef =>
+            def worker: F[Unit] = {
+              tasksRef
+                .modify { tasks =>
+                  if (tasks eq null) {
+                    (null, null)
+                  } else {
+                    val startIdx = ThreadLocalRandom.current().nextInt(size)
+                    var idx = startIdx
+                    var task: F[B] = null.asInstanceOf[F[B]]
+                    var go = true
+                    while ({
+                      task = tasks(idx)
+                      go && (task.asInstanceOf[AnyRef] eq null)
+                    }) {
+                      idx += 1
+                      if (idx == size) {
+                        idx = 0
+                      }
+                      if (idx == startIdx) {
+                        go = false
+                      }
+                    }
+                    if (task.asInstanceOf[AnyRef] ne null) {
+                      (tasks.updated(idx, null.asInstanceOf[F[B]]), IdxAndTask(idx, task))
+                    } else {
+                      (null, null)
+                    }
+                  }
+                }
+                .flatMap {
+                  case null =>
+                    F.unit
+                  case IdxAndTask(idx, nextTask) =>
+                    nextTask.flatMap { result =>
+                      resultsRef.update { results => results.updated(idx, result) }
+                    } *> worker
+                }
+            }
+
+            worker.parReplicateA_(n) *> resultsRef.get.map { (results: Vector[B]) =>
+              val it = results.iterator
+              ta.map { _ => it.next() }
+            }
+          }
+        } else {
+          // empty `T[A]`
+          ta.traverse { _ => F.never[B] }
+        }
+      }
+    }
+  }
 
   implicit def genConcurrentForOptionT[F[_], E](
       implicit F0: GenConcurrent[F, E]): GenConcurrent[OptionT[F, *], E] =
