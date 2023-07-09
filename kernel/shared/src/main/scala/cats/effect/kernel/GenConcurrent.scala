@@ -22,8 +22,10 @@ import cats.effect.kernel.instances.spawn._
 import cats.effect.kernel.syntax.all._
 import cats.syntax.all._
 
+import scala.collection.mutable
+
 import java.util.concurrent.ThreadLocalRandom
-import java.util.concurrent.atomic.AtomicReferenceArray
+import java.util.concurrent.atomic.AtomicInteger
 
 trait GenConcurrent[F[_], E] extends GenSpawn[F, E] {
 
@@ -183,70 +185,146 @@ object GenConcurrent {
       f: A => F[B])(implicit F: GenConcurrent[F, E], T: Traverse[T]): F[T[B]] = {
     require(n >= 1, s"Concurrency limit should be at least 1, was: $n")
     F match {
-      case asyncF: Async[_] => parTraverseNAsync(n)(ta)(f)(asyncF, T)
+      case asyncF: Async[_] => parTraverseN_3(n)(ta)(f)(asyncF, T)
       case _ => parTraverseNConcurrent(n)(ta)(f)
     }
   }
 
-  private[this] final def parTraverseNAsync[F[_], T[_], A, B](n: Int)(ta: T[A])(
+  private[this] final def parTraverseN_3[F[_], T[_], A, B](n: Int)(ta: T[A])(
       f: A => F[B])(implicit F: Async[F], T: Traverse[T]): F[T[B]] = {
-    F.suspend(Sync.Type.Delay) {
-      val initialTasks =
-        ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
-      val size = initialTasks.size
-      val tasks = new AtomicReferenceArray[F[B]](size)
-      var idx = 0
-      initialTasks.foreach { task =>
-        tasks.lazySet(idx, task)
-        idx += 1
-      }
-      tasks
-    }.flatMap { (tasks: AtomicReferenceArray[F[B]]) =>
-      val size = tasks.length()
-      if (size > 0) {
-        // non-empty `T[A]`
-        F.delay { new Array[AnyRef](size) }.flatMap { results =>
-          def worker: F[Unit] = {
-            F.delay {
-              val startIdx = ThreadLocalRandom.current().nextInt(size)
-              var idx = startIdx
-              var task: F[B] = null.asInstanceOf[F[B]]
-              var go = true
-              while ({
-                task = tasks.getAndSet(idx, null.asInstanceOf[F[B]])
-                go && (task.asInstanceOf[AnyRef] eq null)
-              }) {
-                idx += 1
-                if (idx == size) {
-                  idx = 0
-                }
-                if (idx == startIdx) {
-                  go = false
-                }
-              }
-              if (task.asInstanceOf[AnyRef] ne null) IdxAndTask(idx, task)
-              else null
-            }.flatMap {
-              case null =>
-                F.unit
-              case IdxAndTask(idx, nextTask) =>
-                nextTask.flatMap { result =>
-                  F.delay { results(idx) = result.asInstanceOf[AnyRef] }
-                } *> worker
+    F.delay(new AtomicInteger).flatMap { head =>
+      val tasks = ta.foldLeft(new scala.collection.mutable.ArrayBuffer[F[B]]()) { (ab, a) => ab += f(a) }
+      val size = tasks.length
+      val indices = shuffleIndices(size)
+      val shuffledTasks = shuffle(tasks, indices)
+      F.delay {
+        new mutable.ArraySeq.ofRef[AnyRef](new Array[AnyRef](size)).asInstanceOf[mutable.ArraySeq[B]]
+      }.flatMap { results =>
+
+        def worker: F[Unit] = {
+          F.delay(head.getAndIncrement()).flatMap { nextIdx =>
+            if (nextIdx < size) {
+              val nextTask = shuffledTasks(nextIdx)
+              nextTask.flatMap { result =>
+                F.delay { results(nextIdx) = result }
+              } *> worker
+            } else {
+              F.unit
             }
           }
-
-          worker.parReplicateA_(n) *> F.delay {
-            val it = results.iterator
-            ta.map { _ => it.next().asInstanceOf[B] }
-          }
         }
-      } else {
-        // empty `T[A]`
-        ta.traverse { _ => F.never[B] }
+
+        worker.parReplicateA_(n) *> F.delay {
+          unshuffle(results, indices, ta)
+        }
       }
     }
   }
+
+  private[this] final def shuffleIndices(size: Int): Array[Int] = {
+    val indices = new Array[Int](size)
+    var i = 0
+    // first we fill the array with the indices:
+    while (i < size) {
+      indices(i) = i
+      i += 1
+    }
+    // then we shuffle them (Fisher-Yates/Knuth):
+    val rnd = ThreadLocalRandom.current()
+    while (i > 1) {
+      i -= 1
+      val j = rnd.nextInt(i + 1)
+      swap(indices, j, i)
+    }
+    indices
+  }
+
+  private[this] final def shuffle[B](ab: mutable.ArrayBuffer[B], indices: Array[Int]): mutable.ArraySeq[B] = {
+    val size = ab.length
+    val shuffled = (new mutable.ArraySeq.ofRef[AnyRef](new Array[AnyRef](size))).asInstanceOf[mutable.ArraySeq[B]]
+    var i = 0
+    while (i < size) {
+      val idx = indices(i)
+      shuffled(idx) = ab(i)
+      i += 1
+    }
+    shuffled
+  }
+
+  private[this] final def unshuffle[T[_] : Traverse, A, B](results: mutable.ArraySeq[B], indices: Array[Int], ta: T[A]): T[B] = {
+    var i = 0
+    ta.map { _ =>
+      val idx = indices(i)
+      i += 1
+      results(idx)
+    }
+  }
+
+  private[this] final def swap[A](ab: mutable.IndexedSeq[A], j: Int, i: Int): Unit = {
+    val tmp = ab(j)
+    ab.update(j, ab(i))
+    ab(i) = tmp
+  }
+
+  // private[this] final def parTraverseNAsync[F[_], T[_], A, B](n: Int)(ta: T[A])(
+  //     f: A => F[B])(implicit F: Async[F], T: Traverse[T]): F[T[B]] = {
+  //   F.suspend(Sync.Type.Delay) {
+  //     val initialTasks =
+  //       ta.foldLeft(Vector.newBuilder[F[B]]) { (builder, a) => builder += f(a) }.result()
+  //     val size = initialTasks.size
+  //     val tasks = new AtomicReferenceArray[F[B]](size)
+  //     var idx = 0
+  //     initialTasks.foreach { task =>
+  //       tasks.lazySet(idx, task)
+  //       idx += 1
+  //     }
+  //     tasks
+  //   }.flatMap { (tasks: AtomicReferenceArray[F[B]]) =>
+  //     val size = tasks.length()
+  //     if (size > 0) {
+  //       // non-empty `T[A]`
+  //       F.delay { new Array[AnyRef](size) }.flatMap { results =>
+  //         def worker: F[Unit] = {
+  //           F.delay {
+  //             val startIdx = ThreadLocalRandom.current().nextInt(size)
+  //             var idx = startIdx
+  //             var task: F[B] = null.asInstanceOf[F[B]]
+  //             var go = true
+  //             while ({
+  //               task = tasks.getAndSet(idx, null.asInstanceOf[F[B]])
+  //               go && (task.asInstanceOf[AnyRef] eq null)
+  //             }) {
+  //               idx += 1
+  //               if (idx == size) {
+  //                 idx = 0
+  //               }
+  //               if (idx == startIdx) {
+  //                 go = false
+  //               }
+  //             }
+  //             if (task.asInstanceOf[AnyRef] ne null) IdxAndTask(idx, task)
+  //             else null
+  //           }.flatMap {
+  //             case null =>
+  //               F.unit
+  //             case IdxAndTask(idx, nextTask) =>
+  //               nextTask.flatMap { result =>
+  //                 F.delay { results(idx) = result.asInstanceOf[AnyRef] }
+  //               } *> worker
+  //           }
+  //         }
+
+  //         worker.parReplicateA_(n) *> F.delay {
+  //           val it = results.iterator
+  //           ta.map { _ => it.next().asInstanceOf[B] }
+  //         }
+  //       }
+  //     } else {
+  //       // empty `T[A]`
+  //       ta.traverse { _ => F.never[B] }
+  //     }
+  //   }
+  // }
 
   private[this] final def parTraverseNConcurrent[F[_], T[_], E, A, B](n: Int)(ta: T[A])(
       f: A => F[B])(implicit F: GenConcurrent[F, E], T: Traverse[T]): F[T[B]] = {
