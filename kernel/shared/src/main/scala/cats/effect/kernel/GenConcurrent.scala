@@ -230,11 +230,16 @@ object GenConcurrent {
       i += 1
     }
     // then we shuffle them (Fisher-Yates/Knuth):
+    def swap[A](j: Int, i: Int): Unit = {
+      val tmp = indices(j)
+      indices(j) = indices(i)
+      indices(i) = tmp
+    }
     val rnd = ThreadLocalRandom.current()
     while (i > 1) {
       i -= 1
       val j = rnd.nextInt(i + 1)
-      swap(indices, j, i)
+      swap(j, i)
     }
     indices
   }
@@ -258,12 +263,6 @@ object GenConcurrent {
       i += 1
       results(idx)
     }
-  }
-
-  private[this] final def swap[A](ab: mutable.IndexedSeq[A], j: Int, i: Int): Unit = {
-    val tmp = ab(j)
-    ab.update(j, ab(i))
-    ab(i) = tmp
   }
 
   // private[this] final def parTraverseNAsync[F[_], T[_], A, B](n: Int)(ta: T[A])(
