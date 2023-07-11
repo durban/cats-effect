@@ -16,16 +16,19 @@
 
 package cats.effect.kernel
 
-import cats.{~>, Monoid, Semigroup}
+import cats.effect.kernel.instances.spawn.parallelForGenSpawn
+
+import cats.{~>, Monoid, Parallel, Semigroup, Traverse}
 import cats.arrow.FunctionK
 import cats.data.{EitherT, Ior, IorT, Kleisli, OptionT, WriterT}
 import cats.implicits._
 
 import scala.annotation.{nowarn, tailrec}
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 
-import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.{Executor, ThreadLocalRandom}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 /**
  * A typeclass that encodes the notion of suspending asynchronous side effects in the `F[_]`
@@ -255,6 +258,91 @@ trait Async[F[_]] extends AsyncPlatform[F] with Sync[F] with Temporal[F] {
    * Note that if you use `defaultCont` you _have_ to override `async/asyncCheckAttempt`.
    */
   def cont[K, R](body: Cont[F, K, R]): F[R]
+
+  /**
+   * We override the implementation in `GenConcurrent` for performance reasons.
+   */
+  override def parTraverseN[T[_]: Traverse, A, B](n: Int)(ta: T[A])(f: A => F[B]): F[T[B]] = {
+    require(n >= 1, s"Concurrency limit should be at least 1, was: $n")
+    flatMap(delay(new AtomicInteger)) { head =>
+      val tasks = ta.foldLeft(new mutable.ArrayBuffer[F[B]]()) { (ab, a) => ab += f(a) }
+      val size = tasks.length
+      val indices = shuffleIndices(size)
+      val shuffledTasks = shuffle(tasks, indices)
+      flatMap(delay {
+        new mutable.ArraySeq.ofRef[AnyRef](new Array[AnyRef](size))
+          .asInstanceOf[mutable.ArraySeq[B]]
+      }) { results =>
+        def worker: F[Unit] = {
+          flatMap(delay(head.getAndIncrement())) { nextIdx =>
+            if (nextIdx < size) {
+              val nextTask = shuffledTasks(nextIdx)
+              val doOneTask = flatMap(nextTask) { result =>
+                delay { results(nextIdx) = result }
+              }
+              productR(productR(doOneTask)(cede))(worker)
+            } else {
+              unit
+            }
+          }
+        }
+
+        productR(Parallel.parReplicateA_(n, worker)(parallelForGenSpawn(this)))(
+          delay { unshuffle(results, indices, ta) }
+        )
+      }
+    }
+  }
+
+  private[this] final def shuffleIndices(size: Int): Array[Int] = {
+    val indices = new Array[Int](size)
+    var i = 0
+    // first we fill the array with the indices:
+    while (i < size) {
+      indices(i) = i
+      i += 1
+    }
+    // then we shuffle them (Fisher-Yates/Knuth):
+    def swap[A](j: Int, i: Int): Unit = {
+      val tmp = indices(j)
+      indices(j) = indices(i)
+      indices(i) = tmp
+    }
+    val rnd = ThreadLocalRandom.current()
+    while (i > 1) {
+      i -= 1
+      val j = rnd.nextInt(i + 1)
+      swap(j, i)
+    }
+    indices
+  }
+
+  private[this] final def shuffle[B](
+      ab: mutable.ArrayBuffer[B],
+      indices: Array[Int]): mutable.ArraySeq[B] = {
+    val size = ab.length
+    val shuffled = (new mutable.ArraySeq.ofRef[AnyRef](new Array[AnyRef](size)))
+      .asInstanceOf[mutable.ArraySeq[B]]
+    var i = 0
+    while (i < size) {
+      val idx = indices(i)
+      shuffled(idx) = ab(i)
+      i += 1
+    }
+    shuffled
+  }
+
+  private[this] final def unshuffle[T[_]: Traverse, A, B](
+      results: mutable.ArraySeq[B],
+      indices: Array[Int],
+      ta: T[A]): T[B] = {
+    var i = 0
+    ta.map { _ =>
+      val idx = indices(i)
+      i += 1
+      results(idx)
+    }
+  }
 }
 
 object Async {
