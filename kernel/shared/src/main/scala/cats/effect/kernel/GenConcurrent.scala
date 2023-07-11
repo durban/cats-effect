@@ -207,7 +207,7 @@ object GenConcurrent {
               val nextTask = shuffledTasks(nextIdx)
               nextTask.flatMap { result =>
                 F.delay { results(nextIdx) = result }
-              } *> worker
+              } *> F.cede *> worker
             } else {
               F.unit
             }
