@@ -45,6 +45,12 @@ import java.util.concurrent.TimeUnit
 @OutputTimeUnit(TimeUnit.SECONDS)
 class ParallelBenchmark {
 
+  /**
+   * Semi-arbitrarily chosen maximal amount of tokens to pass to `consumeCPU` without `cede`ing.
+   * (It takes approximately 10 microseconds.)
+   */
+  private[this] final val maxTokens = 5000L
+
   @Param(Array( /*"100", */ "1000" /*, "10000"*/ ))
   var size: Int = _
 
@@ -53,9 +59,14 @@ class ParallelBenchmark {
 
   @Benchmark
   def parTraverse(): Unit =
-    1.to(size).toList.parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens))).void.unsafeRunSync()
+    1.to(size).toList.parTraverse(_ => consumeCpu(cpuTokens)).void.unsafeRunSync()
 
   @Benchmark
   def traverse(): Unit =
-    1.to(size).toList.traverse(_ => IO(Blackhole.consumeCPU(cpuTokens))).void.unsafeRunSync()
+    1.to(size).toList.traverse(_ => consumeCpu(cpuTokens)).void.unsafeRunSync()
+
+  private[this] final def consumeCpu(tokens: Long): IO[Unit] = {
+    if (tokens <= maxTokens) IO(Blackhole.consumeCPU(tokens))
+    else IO(Blackhole.consumeCPU(maxTokens)) *> IO.cede >> consumeCpu(tokens - maxTokens)
+  }
 }
