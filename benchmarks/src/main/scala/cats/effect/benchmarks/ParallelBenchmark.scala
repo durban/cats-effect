@@ -56,7 +56,12 @@ class ParallelBenchmark {
 
   @Benchmark
   def parTraverse(): Unit =
-    1.to(size).toList.parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens))).void.unsafeRunSync()
+    1.to(size)
+      .toList
+      .parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .void
+      .replicateA_(100)
+      .unsafeRunSync()
 
   @Benchmark
   def parTraverseN(): Unit = {
@@ -64,10 +69,16 @@ class ParallelBenchmark {
       .toList
       .parTraverseN(nCpu)(_ => IO(Blackhole.consumeCPU(cpuTokens)))
       .void
+      .replicateA_(100)
       .unsafeRunSync()
   }
 
   @Benchmark
   def traverse(): Unit =
-    1.to(size).toList.traverse(_ => IO(Blackhole.consumeCPU(cpuTokens))).void.unsafeRunSync()
+    1.to(size)
+      .toList
+      .traverse(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .void
+      .replicateA_(100)
+      .unsafeRunSync()
 }
