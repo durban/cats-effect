@@ -52,24 +52,26 @@ class ParallelBenchmark {
   @Param(Array( /*"100", "1000", */ "10000" /*, "100000", "1000000"*/ ))
   var cpuTokens: Long = _
 
+  private[this] final val batchSize = 10
+
   private[this] val nCpu = Runtime.getRuntime().availableProcessors()
 
   @Benchmark
   def parTraverse(): Unit =
     1.to(size)
       .toList
-      .parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .parTraverse(_ => IO(Blackhole.consumeCPU(cpuTokens / batchSize)))
       .void
-      .replicateA_(100)
+      .replicateA_(batchSize)
       .unsafeRunSync()
 
   @Benchmark
   def parTraverseN(): Unit = {
     1.to(size)
       .toList
-      .parTraverseN(nCpu)(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .parTraverseN(nCpu)(_ => IO(Blackhole.consumeCPU(cpuTokens / batchSize)))
       .void
-      .replicateA_(100)
+      .replicateA_(batchSize)
       .unsafeRunSync()
   }
 
@@ -77,8 +79,8 @@ class ParallelBenchmark {
   def traverse(): Unit =
     1.to(size)
       .toList
-      .traverse(_ => IO(Blackhole.consumeCPU(cpuTokens)))
+      .traverse(_ => IO(Blackhole.consumeCPU(cpuTokens / batchSize)))
       .void
-      .replicateA_(100)
+      .replicateA_(batchSize)
       .unsafeRunSync()
 }
