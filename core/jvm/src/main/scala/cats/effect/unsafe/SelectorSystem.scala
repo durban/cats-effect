@@ -130,7 +130,8 @@ final class SelectorSystem private (provider: SelectorProvider) extends PollingS
             }
 
             cb(Right(Some(cancel)))
-          } catch { case ex if NonFatal(ex) => cb(Left(ex)) }
+            ()
+          } catch { case ex if NonFatal(ex) => cb(Left(ex)); () }
         }
       }
     }
@@ -155,7 +156,7 @@ object SelectorSystem {
     private var head: Node = null
     private var last: Node = null
 
-    def append(interest: Int, callback: Either[Throwable, Int] => Unit): Node = {
+    def append(interest: Int, callback: Either[Throwable, Int] => Boolean): Node = {
       val node = new Node(interest, callback)
       if (last ne null) {
         last.next = node
@@ -181,7 +182,7 @@ object SelectorSystem {
 
     final class Node(
         var interest: Int,
-        var callback: Either[Throwable, Int] => Unit
+        var callback: Either[Throwable, Int] => Boolean
     ) {
       var prev: Node = null
       var next: Node = null
@@ -200,5 +201,4 @@ object SelectorSystem {
       }
     }
   }
-
 }

@@ -172,7 +172,7 @@ private[effect] final class WorkerThread[P <: AnyRef](
 
   def sleep(
       delay: FiniteDuration,
-      callback: Right[Nothing, Unit] => Unit): Function0[Unit] with Runnable =
+      callback: Right[Nothing, Unit] => Boolean): Function0[Unit] with Runnable =
     sleepImpl(nanoTime(), delay.toNanos, callback)
 
   /**
@@ -181,7 +181,7 @@ private[effect] final class WorkerThread[P <: AnyRef](
   def sleepLate(
       scheduledAt: Long,
       delay: FiniteDuration,
-      callback: Right[Nothing, Unit] => Unit): Function0[Unit] with Runnable = {
+      callback: Right[Nothing, Unit] => Boolean): Function0[Unit] with Runnable = {
     val _now = nanoTime()
     val newDelay = delay.toNanos - (_now - scheduledAt)
     if (newDelay > 0) {
@@ -195,8 +195,8 @@ private[effect] final class WorkerThread[P <: AnyRef](
   private[this] def sleepImpl(
       now: Long,
       delay: Long,
-      callback: Right[Nothing, Unit] => Unit): Function0[Unit] with Runnable = {
-    val out = new Array[Right[Nothing, Unit] => Unit](1)
+      callback: Right[Nothing, Unit] => Boolean): Function0[Unit] with Runnable = {
+    val out = new Array[Right[Nothing, Unit] => Boolean](1)
 
     // note that blockers aren't owned by the pool, meaning we only end up here if !blocking
     val cancel = sleepers.insert(
