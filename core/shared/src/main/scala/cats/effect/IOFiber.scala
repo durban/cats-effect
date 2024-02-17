@@ -250,8 +250,10 @@ private final class IOFiber[A](
     } else {
 
       if (masks < 0) {
-        // We're `poll(/*HERE*/_cur0)`, so
-        // we need to unmask (and remove the
+        // We're `poll(/*HERE*/_cur0)`, or
+        // inside `cont`, so the cancelation
+        // check above was suppressed, so we
+        // need to unmask now (and remove the
         // negative `masks`). This is the
         // same as `masks = (-masks) - 1`:
         masks = ~masks
@@ -608,7 +610,7 @@ private final class IOFiber[A](
             /*
              * We can't unmask right now, because right
              * inside poll we're not allowed to cancel.
-             * We'll have to unmark right before starting
+             * We'll have to unmask right before starting
              * to execute `cur.ioa`. So we encode this
              * by multiplying `masks` with -1, and check
              * for that during the next iteration.
@@ -619,7 +621,6 @@ private final class IOFiber[A](
              * to restore masking state after `cur.ioa` has finished
              */
             conts = ByteStack.push(conts, UnmaskK)
-
           }
 
           runLoop(cur.ioa, nextCancelation, nextAutoCede)
@@ -798,6 +799,11 @@ private final class IOFiber[A](
               case t: Throwable =>
                 onFatalFailure(t)
             }
+
+          // We need to suppress cancellation
+          // before `next`; this is `-(masks + 1)`
+          // (except for overflow):
+          masks = ~masks
 
           runLoop(next, nextCancelation, nextAutoCede)
 
