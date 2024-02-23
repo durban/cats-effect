@@ -207,7 +207,10 @@ private[effect] final class WorkerThread[P <: AnyRef](
     )
 
     val cb = out(0)
-    if (cb ne null) cb(RightUnit)
+    if (cb ne null) {
+      cb(RightUnit)
+      ()
+    }
 
     cancel
   }
